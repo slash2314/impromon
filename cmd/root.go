@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"impromon/tui"
 	"os"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
@@ -44,7 +45,11 @@ var rootCmd = &cobra.Command{
 				os.Exit(1)
 			}
 		}
-
+		timeout, err := cmd.Flags().GetDuration("timeout")
+		if err != nil {
+			fmt.Printf("There was an error reading the timeout: %v\n", err)
+			os.Exit(1)
+		}
 		if len(urlsArg) == 0 && serverList == "" {
 			fmt.Println("No urls to monitor")
 			cmd.Help()
@@ -60,7 +65,7 @@ var rootCmd = &cobra.Command{
 		} else {
 			urls = urlsArg
 		}
-		m := tui.InitModel(urls)
+		m := tui.InitModel(urls, timeout)
 		if _, err := tea.NewProgram(&m).Run(); err != nil {
 			fmt.Printf("There was an error: %v\n", err)
 			os.Exit(1)
@@ -77,6 +82,7 @@ func Execute() {
 
 func init() {
 	rootCmd.Flags().StringSliceP("url", "u", []string{}, "URL to monitor")
+	rootCmd.Flags().DurationP("timeout", "t", 1*time.Second, "Timeout for requests")
 	rootCmd.Flags().StringP("server-list", "s", "", "File containing list of servers to monitor")
 }
 

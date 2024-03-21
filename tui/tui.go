@@ -19,9 +19,44 @@ type Model struct {
 	Urls        []string
 	UpSpinner   spinner.Model
 	DownSpinner spinner.Model
+	timeout     time.Duration
+	mu          sync.RWMutex
 }
 
-func InitModel(urls []string) Model {
+func (m *Model) ResultStatus(url string) (int, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	res, ok := m.PollResults.statuses[url]
+	return res, ok
+}
+
+func (m *Model) ResultProtocol(url string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	res, ok := m.PollResults.protocols[url]
+	return res, ok
+}
+
+func (m *Model) ResultStatusLen() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return len(m.PollResults.statuses)
+}
+
+func (m *Model) ResultErr(url string) (error, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	res, ok := m.PollResults.errs[url]
+	return res, ok
+}
+
+func (m *Model) ResultPoolingTimes(url string) time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.PollResults.pollingTimes[url]
+}
+
+func InitModel(urls []string, timeout time.Duration) Model {
 	slowSpinner := spinner.Meter
 	slowSpinner.FPS = time.Second / 3
 	upSpinner := spinner.New(
@@ -39,6 +74,7 @@ func InitModel(urls []string) Model {
 		UpSpinner:   upSpinner,
 		DownSpinner: downSpinner,
 		PollResults: NewPollResults(),
+		timeout:     timeout,
 	}
 }
 
@@ -107,7 +143,9 @@ func (m *Model) checkUrls() tea.Cmd {
 			close(pollResultChan)
 		}()
 		for pollRes := range pollResultChan {
+			m.mu.Lock()
 			m.PollResults.AddResult(pollRes)
+			m.mu.Unlock()
 		}
 		return m.PollResults
 	})
@@ -115,7 +153,9 @@ func (m *Model) checkUrls() tea.Cmd {
 
 // processUrl checks the status of the url
 // It sends the result to the pollResultChan
-func (m *Model) processUrl(url string, wg *sync.WaitGroup, pollResultChan chan pollResult) {
+func (m *Model) processUrl(url string,
+	wg *sync.WaitGroup,
+	pollResultChan chan pollResult) {
 	defer wg.Done()
 	pollRes := pollResult{url: url}
 	pollRes.lastPoll = time.Now()
@@ -129,9 +169,9 @@ func (m *Model) processUrl(url string, wg *sync.WaitGroup, pollResultChan chan p
 	var status int
 	switch prefix {
 	case "http", "https":
-		status, err = httpCheck(url, 1*time.Second)
+		status, err = httpCheck(url, m.timeout)
 	case "tcp":
-		status, err = tcpCheck(url, 1*time.Second)
+		status, err = dialCheck(url, m.timeout)
 	default:
 		pollRes.err = fmt.Errorf("unsupported protocol %s", prefix)
 		pollResultChan <- pollRes
@@ -186,10 +226,10 @@ func parseUri(url string) (UriComponents, error) {
 
 }
 
-// tcpCheck checks the status of the url
+// dialCheck checks the status of the url
 // It returns 1 if the url is reachable
 // It returns an error if the url is not reachable
-func tcpCheck(url string, timeout time.Duration) (int, error) {
+func dialCheck(url string, timeout time.Duration) (int, error) {
 	uriComps, err := parseUri(url)
 	if err != nil {
 		return 0, err
@@ -230,26 +270,26 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View will display the status of the urls in the terminal
 func (m *Model) View() string {
-	pr := m.PollResults
+	// pr := m.PollResults
 	var s string
 	upSpinView := m.UpSpinner.View()
 
-	if len(pr.statuses) == 0 {
+	if m.ResultStatusLen() == 0 {
 		s += fmt.Sprintf("%s Checking urls ...", upSpinView)
 	}
 	for _, url := range m.Urls {
-		pollingTime := pr.pollingTimes[url].Format(time.RFC3339)
-		if urlStatus, ok := pr.statuses[url]; ok && urlStatus != 0 {
-			switch pr.protocols[url] {
+		pollingTime := m.ResultPoolingTimes(url).Format(time.RFC3339)
+		if urlStatus, ok := m.ResultStatus(url); ok && urlStatus != 0 {
+			prot, _ := m.ResultProtocol(url)
+			switch prot {
 			case "http", "https":
-				status := pr.statuses[url]
-				statusText := http.StatusText(status)
-				s += fmt.Sprintf("\n%s %s %d %s at %s", upSpinView, url, status, statusText, pollingTime)
+				statusText := http.StatusText(urlStatus)
+				s += fmt.Sprintf("\n%s %s %d %s at %s", upSpinView, url, urlStatus, statusText, pollingTime)
 			case "tcp":
 				s += fmt.Sprintf("\n%s %s at %s", upSpinView, url, pollingTime)
 			}
-		} else if pr.errs[url] != nil {
-			s += fmt.Sprintf("\n%s %s %s at %s", m.DownSpinner.View(), url, pr.errs[url].Error(), pollingTime)
+		} else if err, ok := m.ResultErr(url); ok {
+			s += fmt.Sprintf("\n%s %s %s at %s", m.DownSpinner.View(), url, err.Error(), pollingTime)
 		}
 	}
 
